@@ -145,6 +145,7 @@ int buffer_lock_write_loop(buffer_lock_t *buf_lock, int nframes, unsigned timeou
 
     buffer_t *buf = buffer_lock_get(buf_lock, 0, &counter);
     if (!buf) {
+      LOG_DEBUG(buf_lock, "No buffer after %d frames.", frames);
       goto error;
     }
 
@@ -154,6 +155,7 @@ int buffer_lock_write_loop(buffer_lock_t *buf_lock, int nframes, unsigned timeou
     if (ret > 0) {
       frames++;
     } else if (ret < 0) {
+      LOG_DEBUG(buf_lock, "Write failed after %d frames.", frames);
       goto error;
     } else if(!frames && deadline_ms < get_monotonic_time_us(NULL, NULL)) {
       LOG_DEBUG(buf_lock, "Deadline getting frame elapsed.");
