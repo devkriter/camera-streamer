@@ -27,7 +27,10 @@ bool buffer_lock_needs_buffer(buffer_lock_t *buf_lock)
   bool needs_buffer = false;
 
   pthread_mutex_lock(&buf_lock->lock);
-  if (buf_lock->timeout_us > 0 && now - buf_lock->buf_time_us > buf_lock->timeout_us) {
+  // Drop a stale buffer only while nobody is reading: with a write loop
+  // active (refs > 0) the next capture replaces it anyway, and dropping it
+  // here makes a reader that is woken but not yet scheduled find no buffer.
+  if (buf_lock->refs == 0 && buf_lock->timeout_us > 0 && now - buf_lock->buf_time_us > buf_lock->timeout_us) {
     buffer_consumed(buf_lock->buf, buf_lock->name);
     buf_lock->buf = NULL;
   }
@@ -104,11 +107,15 @@ buffer_t *buffer_lock_get(buffer_lock_t *buf_lock, int timeout_ms, int *counter)
   get_time_us(CLOCK_REALTIME, &timeout, NULL, timeout_ms * 1000LL);
 
   pthread_mutex_lock(&buf_lock->lock);
-  if (*counter == buf_lock->counter || !buf_lock->buf) {
+  // Re-check after every wakeup: the wait can return spuriously, and the
+  // buffer can be cleared before this thread gets the lock back.
+  while (*counter == buf_lock->counter || !buf_lock->buf) {
     int ret = pthread_cond_timedwait(&buf_lock->cond_wait, &buf_lock->lock, &timeout);
     if (ret == ETIMEDOUT) {
+      LOG_DEBUG(buf_lock, "Timed out waiting for a buffer.");
       goto ret;
-    } else if (ret < 0) {
+    } else if (ret != 0) {
+      LOG_INFO(buf_lock, "Waiting for a buffer failed: %d", ret);
       goto ret;
     }
   }
