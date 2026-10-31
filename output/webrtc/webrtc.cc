@@ -108,8 +108,13 @@ public:
 
   void close()
   {
-    if (pc)
+    if (!pc)
+      return;
+    try {
       pc->close();
+    } catch (const std::exception &e) {
+      LOG_INFO(this, "Closing the peer connection failed: %s", e.what());
+    }
   }
 
   bool wantsKeepAlive()
@@ -131,8 +136,14 @@ public:
 
     if (dc_keepAlive->isOpen() && now_us - last_ping_us >= DEFAULT_PING_INTERVAL_US) {
       LOG_DEBUG(this, "Checking if client still alive.");
-      dc_keepAlive->send("ping");
       last_ping_us = now_us;
+      try {
+        dc_keepAlive->send("ping");
+      } catch (const std::exception &e) {
+        // The SCTP socket is gone (e.g. EPIPE): the client disappeared without closing.
+        LOG_INFO(this, "Sending keepalive failed: %s. Dropping client.", e.what());
+        return false;
+      }
     }
 
     if (now_us - last_pong_us >= DEFAULT_PONG_INTERVAL_US) {
@@ -152,10 +163,10 @@ public:
     return video->wantsFrame();
   }
 
-  void pushFrame(buffer_t *buf)
+  bool pushFrame(buffer_t *buf)
   {
     if (!video || !video->track) {
-      return;
+      return true;
     }
 
     if (!had_key_frame) {
@@ -167,12 +178,18 @@ public:
         device_video_force_key(buf->buf_list->dev);
         requested_key_frame = true;
       }
-      return;
+      return true;
     }
 
     rtc::binary data((std::byte*)buf->start, (std::byte*)buf->start + buf->used);
-    video->sendTime();
-    video->track->send(data);
+    try {
+      video->sendTime();
+      video->track->send(data);
+    } catch (const std::exception &e) {
+      LOG_INFO(this, "Sending frame failed: %s. Dropping client.", e.what());
+      return false;
+    }
+    return true;
   }
 
   void describePeerConnection(nlohmann::json &message)
@@ -399,9 +416,9 @@ static void webrtc_h264_capture(buffer_lock_t *buf_lock, buffer_t *buf)
 
   std::unique_lock lk(webrtc_clients_lock);
   for (auto client : webrtc_clients) {
-    if (client->wantsFrame())
-      client->pushFrame(buf);
-    if (!client->keepAlive())
+    if (client->wantsFrame() && !client->pushFrame(buf))
+      lost_clients.insert(client);
+    else if (!client->keepAlive())
       lost_clients.insert(client);
   }
   lk.unlock();
