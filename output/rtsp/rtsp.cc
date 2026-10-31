@@ -14,9 +14,8 @@ extern "C" {
 };
 
 #ifdef USE_RTSP
-#if !__has_include(<RTSPServerSupportingHTTPStreaming.hh>)
-#undef USE_RTSP
-#warning "Missing RTSPServerSupportingHTTPStreaming.hh header. The RTSP support will be missing."
+#if __has_include(<RTSPServerSupportingHTTPStreaming.hh>)
+#define USE_RTSP_DYNAMIC_SERVER
 #endif // RTSPServerSupportingHTTPStreaming.hh
 #endif // USE_RTSP
 
@@ -32,7 +31,11 @@ extern "C" {
 #include <set>
 
 #include <BasicUsageEnvironment.hh>
+#ifdef USE_RTSP_DYNAMIC_SERVER
 #include <RTSPServerSupportingHTTPStreaming.hh>
+#else
+#include <RTSPServer.hh>
+#endif
 #include <OnDemandServerMediaSubsession.hh>
 #include <H264VideoStreamFramer.hh>
 #include <H264VideoRTPSink.hh>
@@ -188,6 +191,7 @@ public:
   }
 };
 
+#ifdef USE_RTSP_DYNAMIC_SERVER
 class DynamicRTSPServer: public RTSPServerSupportingHTTPStreaming
 {
 public:
@@ -241,6 +245,7 @@ protected: // redefined virtual functions
     return sms;
   }
 };
+#endif // USE_RTSP_DYNAMIC_SERVER
 
 static void rtsp_frame_finish()
 {
@@ -299,11 +304,27 @@ extern "C" int rtsp_server(rtsp_options_t *options)
 #endif
 
   RTSPServer* rtspServer;
+#ifdef USE_RTSP_DYNAMIC_SERVER
   rtspServer = DynamicRTSPServer::createNew(*env, options->port, authDB);
+#else
+  rtspServer = RTSPServer::createNew(*env, options->port, authDB);
+#endif
   if (rtspServer == NULL) {
     LOG_ERROR(NULL, "Failed to create RTSP server: %s", env->getResultMsg());
     return -1;
   }
+
+#ifndef USE_RTSP_DYNAMIC_SERVER
+  // Newer live555 has no RTSPServerSupportingHTTPStreaming and an async
+  // lookupServerMediaSession(), so register the single stream up front.
+  // reuseFirstSource=false still gives each client its own source.
+  {
+    OutPacketBuffer::maxSize = 2000000; // allow for some possibly large H.264 frames
+    ServerMediaSession *sms = ServerMediaSession::createNew(*env, stream_name, stream_name, "streamed by the LIVE555 Media Server");
+    sms->addSubsession(new DynamicH264VideoFileServerMediaSubsession(*env, false));
+    rtspServer->addServerMediaSession(sms);
+  }
+#endif
   LOG_INFO(NULL, "Running RTSP server on '%d'", options->port);
 
   // if (rtspServer->setUpTunnelingOverHTTP(80) || rtspServer->setUpTunnelingOverHTTP(8000) || rtspServer->setUpTunnelingOverHTTP(8080)) {
